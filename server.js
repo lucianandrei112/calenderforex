@@ -1,92 +1,166 @@
 const express = require('express');
 const cors = require('cors');
-const path = require('path');
 const cron = require('node-cron');
-const { scrapeEconomicCalendar } = require('./scraper');
+const { scrapeMultipleSources } = require('./scraper');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
+// Enable CORS for n8n
 app.use(cors());
 app.use(express.json());
-app.use(express.static('public'));
 
-// In-memory cache voor events
+// Data store
 let cachedEvents = [];
 let lastUpdate = null;
+let scrapeStatus = 'idle';
+let lastError = null;
 
-// Initial scrape bij opstarten
-(async () => {
-    console.log('Starting initial scrape...');
-    const events = await scrapeEconomicCalendar();
-    cachedEvents = events;
-    lastUpdate = new Date();
-    console.log(`Cached ${events.length} high impact events`);
-})();
+// Initial scrape
+async function initialScrape() {
+    console.log('🚀 Starting initial scrape...');
+    scrapeStatus = 'running';
+    try {
+        const result = await scrapeMultipleSources();
+        cachedEvents = result.events;
+        lastUpdate = new Date();
+        lastError = result.error || null;
+        scrapeStatus = 'success';
+        console.log(`✅ Cached ${cachedEvents.length} events from ${result.source}`);
+    } catch (error) {
+        console.error('❌ Initial scrape failed:', error);
+        scrapeStatus = 'error';
+        lastError = error.message;
+        cachedEvents = getStaticData(); // Fallback data
+        lastUpdate = new Date();
+    }
+}
 
-// Schedule scraping elke 30 minuten
-cron.schedule('*/30 * * * *', async () => {
-    console.log('Running scheduled scrape...');
-    const events = await scrapeEconomicCalendar();
-    cachedEvents = events;
-    lastUpdate = new Date();
-    console.log(`Updated cache with ${events.length} events`);
+// Start initial scrape
+initialScrape();
+
+// Schedule updates every 15 minutes
+cron.schedule('*/15 * * * *', async () => {
+    console.log('⏰ Running scheduled scrape...');
+    scrapeStatus = 'running';
+    try {
+        const result = await scrapeMultipleSources();
+        if (result.events && result.events.length > 0) {
+            cachedEvents = result.events;
+            lastUpdate = new Date();
+            scrapeStatus = 'success';
+            lastError = null;
+            console.log(`✅ Updated ${cachedEvents.length} events from ${result.source}`);
+        }
+    } catch (error) {
+        console.error('❌ Scheduled scrape failed:', error);
+        scrapeStatus = 'error';
+        lastError = error.message;
+    }
 });
 
-// API Endpoints
+// MAIN API ENDPOINT voor n8n
 app.get('/api/events', (req, res) => {
     res.json({
-        events: cachedEvents,
+        success: true,
+        timestamp: new Date().toISOString(),
         lastUpdate: lastUpdate,
-        count: cachedEvents.length
+        source: scrapeStatus === 'success' ? 'live' : 'cache',
+        count: cachedEvents.length,
+        events: cachedEvents
     });
 });
 
+// Filter by impact
+app.get('/api/events/high', (req, res) => {
+    const highImpact = cachedEvents.filter(e => 
+        e.impact === 'High' || e.volatility === 'High'
+    );
+    res.json({
+        success: true,
+        timestamp: new Date().toISOString(),
+        count: highImpact.length,
+        events: highImpact
+    });
+});
+
+// Today's events
 app.get('/api/events/today', (req, res) => {
-    const today = new Date().toDateString();
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    
     const todayEvents = cachedEvents.filter(event => {
-        const eventDate = new Date(event.date).toDateString();
-        return eventDate === today;
+        const eventDate = new Date(event.datetime);
+        return eventDate >= today && eventDate < tomorrow;
     });
     
     res.json({
-        events: todayEvents,
-        date: today,
-        count: todayEvents.length
+        success: true,
+        date: today.toISOString(),
+        count: todayEvents.length,
+        events: todayEvents
     });
 });
 
+// This week's events
 app.get('/api/events/week', (req, res) => {
     const now = new Date();
-    const weekFromNow = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    const weekEnd = new Date();
+    weekEnd.setDate(weekEnd.getDate() + 7);
     
     const weekEvents = cachedEvents.filter(event => {
-        const eventDate = new Date(event.date);
-        return eventDate >= now && eventDate <= weekFromNow;
+        const eventDate = new Date(event.datetime);
+        return eventDate >= now && eventDate <= weekEnd;
     });
     
     res.json({
-        events: weekEvents,
-        startDate: now,
-        endDate: weekFromNow,
-        count: weekEvents.length
+        success: true,
+        startDate: now.toISOString(),
+        endDate: weekEnd.toISOString(),
+        count: weekEvents.length,
+        events: weekEvents
     });
 });
 
-// Force refresh endpoint
+// Status endpoint
+app.get('/api/status', (req, res) => {
+    res.json({
+        status: scrapeStatus,
+        lastUpdate: lastUpdate,
+        eventCount: cachedEvents.length,
+        lastError: lastError,
+        uptime: process.uptime()
+    });
+});
+
+// Force refresh
 app.post('/api/refresh', async (req, res) => {
+    if (scrapeStatus === 'running') {
+        return res.json({
+            success: false,
+            message: 'Scrape already in progress'
+        });
+    }
+    
+    scrapeStatus = 'running';
     try {
-        console.log('Manual refresh triggered...');
-        const events = await scrapeEconomicCalendar();
-        cachedEvents = events;
+        const result = await scrapeMultipleSources();
+        cachedEvents = result.events;
         lastUpdate = new Date();
+        scrapeStatus = 'success';
+        lastError = null;
+        
         res.json({
             success: true,
-            events: events.length,
-            lastUpdate: lastUpdate
+            source: result.source,
+            count: cachedEvents.length,
+            timestamp: lastUpdate
         });
     } catch (error) {
+        scrapeStatus = 'error';
+        lastError = error.message;
         res.status(500).json({
             success: false,
             error: error.message
@@ -94,6 +168,101 @@ app.post('/api/refresh', async (req, res) => {
     }
 });
 
+// Health check
+app.get('/health', (req, res) => {
+    res.json({ 
+        status: 'ok', 
+        timestamp: new Date().toISOString() 
+    });
+});
+
+// Root endpoint with API info
+app.get('/', (req, res) => {
+    res.json({
+        name: 'Forex Economic Calendar API',
+        version: '2.0.0',
+        endpoints: {
+            'GET /api/events': 'All events',
+            'GET /api/events/high': 'High impact only',
+            'GET /api/events/today': 'Today\'s events',
+            'GET /api/events/week': 'This week\'s events',
+            'GET /api/status': 'API status',
+            'POST /api/refresh': 'Force refresh',
+            'GET /health': 'Health check'
+        },
+        lastUpdate: lastUpdate,
+        eventCount: cachedEvents.length
+    });
+});
+
+// Static fallback data
+function getStaticData() {
+    const now = new Date();
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    
+    return [
+        {
+            datetime: now.toISOString(),
+            date: now.toISOString().split('T')[0],
+            time: '14:30',
+            currency: 'USD',
+            country: 'United States',
+            event: 'Non-Farm Payrolls',
+            impact: 'High',
+            volatility: 'High',
+            actual: null,
+            forecast: '200K',
+            previous: '187K'
+        },
+        {
+            datetime: now.toISOString(),
+            date: now.toISOString().split('T')[0],
+            time: '14:30',
+            currency: 'USD',
+            country: 'United States',
+            event: 'Unemployment Rate',
+            impact: 'High',
+            volatility: 'High',
+            actual: null,
+            forecast: '3.7%',
+            previous: '3.8%'
+        },
+        {
+            datetime: tomorrow.toISOString(),
+            date: tomorrow.toISOString().split('T')[0],
+            time: '09:45',
+            currency: 'EUR',
+            country: 'Euro Zone',
+            event: 'ECB Interest Rate Decision',
+            impact: 'High',
+            volatility: 'High',
+            actual: null,
+            forecast: '4.25%',
+            previous: '4.25%'
+        },
+        {
+            datetime: tomorrow.toISOString(),
+            date: tomorrow.toISOString().split('T')[0],
+            time: '13:30',
+            currency: 'GBP',
+            country: 'United Kingdom',
+            event: 'BoE Interest Rate Decision',
+            impact: 'High',
+            volatility: 'High',
+            actual: null,
+            forecast: '5.25%',
+            previous: '5.25%'
+        }
+    ];
+}
+
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`
+╔════════════════════════════════════════╗
+║   Forex Calendar API Running!          ║
+║   Port: ${PORT}                            ║
+║   Environment: ${process.env.NODE_ENV || 'development'}           ║
+╚════════════════════════════════════════╝
+    `);
 });
