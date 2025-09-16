@@ -1,22 +1,15 @@
-# Forex Economic Calendar - High Impact Events
+# Forex Economic Calendar API
 
-Een gratis economische kalender voor forex traders die alleen high impact events toont.
+Pure JSON API voor high impact forex events. Geen UI, alleen data.
 
 ## Features
-- 🎯 Alleen high impact economische events
-- 🔄 Automatische updates elke 30 minuten
-- 📊 Real-time data scraping (geen API key nodig)
-- 🚀 Gratis te hosten op Railway
-- 📱 Responsive design voor desktop en mobile
+- ✅ **JSON only** - Perfect voor n8n integratie
+- ✅ **Multiple sources** - Myfxbook, DailyFX, FXStreet
+- ✅ **Auto-fallback** - Als een bron faalt, probeert de volgende
+- ✅ **Static fallback** - Altijd data, zelfs offline
+- ✅ **Zero config** - Geen API keys nodig
+- ✅ **Railway ready** - Direct te deployen
 
-## Deployment op Railway
+## API Endpoints
 
-### Stap 1: Fork deze repository
-1. Klik op "Fork" in GitHub
-2. Clone je geforkte repository lokaal
-
-### Stap 2: Push naar GitHub
-```bash
-git add .
-git commit -m "Initial commit"
-git push origin main
+### Get all events
